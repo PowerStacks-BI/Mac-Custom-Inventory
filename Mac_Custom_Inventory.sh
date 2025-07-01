@@ -7,7 +7,7 @@ CustomerId="<ENTER YOUR LOG ANALYTICS WORKSPACE ID>"
 SharedKey="<ENTER YOUR LOG ANALYTICS PRIMARY KEY HERE>"
  
 #Control if you want to collect App or Device Inventory or both (True = Collect)
-CollectDeviceInventory=false
+CollectDeviceInventory=true
 CollectAppInventory=true
  
 # You can use an optional field to specify the timestamp from the data. If the time field is not specified, Azure Monitor assumes the time is the message ingestion time
@@ -181,6 +181,105 @@ if [ "$CollectAppInventory" = true ]; then
  
 fi
 #endregion APPINVENTORY
+
+#region DEVICEINVENTORY
+ 
+if [ "$CollectDeviceInventory" = true ]; then
+    #Set Name of Log
+    DeviceLog="PowerStacksDeviceInventory"
+ 
+    # --- CPU Info ---
+    cpu_manufacturer=$(sysctl -n machdep.cpu.vendor 2>/dev/null || echo "Apple")
+    cpu_name=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Apple Silicon")
+    if [[ "$cpu_name" == Apple* ]]; then
+        cpu_vendor="Apple"
+    else
+        cpu_vendor=$(sysctl -n machdep.cpu.vendor 2>/dev/null || echo "Intel")
+    fi
+    cpu_physical=$(sysctl -n hw.packages)
+    cpu_cores=$(sysctl -n hw.physicalcpu)
+    cpu_logical=$(sysctl -n hw.logicalcpu)
+    if [ "$cpu_vendor" != "Apple" ]; then
+        cpu_max_clock=$(bc <<< "$(sysctl -n hw.cpufrequency_max)/1000") # MHz
+    fi
+    # --- Memory ---
+    memory=$(sysctl -n hw.memsize)
+
+    # --- Boot Time ---
+    last_boot=$(sysctl -n kern.boottime | awk -F '[=,]' '{print $2}' | xargs -I{} date -u -r {} +"%Y-%m-%dT%H:%M:%S.0000000Z")
+
+    # --- Device Info ---
+    device_model=$(system_profiler SPHardwareDataType | awk -F': ' '/Model Identifier/{print $2}')
+    device_manufacturer="Apple Inc."
+
+    # --- Disk Info ---
+    disk_id="disk0"
+    disk_info=$(diskutil info "$disk_id")
+
+    # Extract fields
+    disk_model=$(echo "$disk_info" | awk -F': ' '/Device \/ Media Name/ {print $2}' | xargs)
+    disk_bus=$(echo "$disk_info" | awk -F': ' '/Protocol/ {print $2}'| xargs)
+    disk_type=$(echo "$disk_info" | awk -F': *' '/Solid State/ { print ($2 == "Yes" ? "SSD" : "HDD") }')
+    disk_size_bytes=$(echo "$disk_info" | awk -F'[()]' '/Disk Size/ {gsub(/[^0-9]/, "", $2); print $2}')
+    disk_smart=$(echo "$disk_info" | awk -F': ' '/SMART Status/ {print $2}' | xargs)
+    disk_temp=$(ioreg -lw0 | grep -i "temperature" | grep -Eo '[0-9]+' | head -n 1)
+    disk_temp="${disk_temp:-0}"
+    if [ "$disk_smart" == "Verified" ]; then
+        disk_smart="Healthy"
+    fi
+
+    # --- Battery Info ---
+    battery_data=$(ioreg -r -n AppleSmartBattery)
+    if [ "$cpu_vendor" == "Apple" ]; then
+        max_capacity=$(echo "$battery_data" | awk '/"AppleRawMaxCapacity" / { print $NF }')
+    else
+        max_capacity=$(echo "$battery_data" | awk '/"MaxCapacity" / { print $NF }')
+    fi
+    design_capacity=$(echo "$battery_data" | awk '/"DesignCapacity" / { print $NF }')
+    battery_health=""
+    if [ -n "$max_capacity" ] && [ -n "$design_capacity" ]; then
+        percent=$(echo "scale=2; $max_capacity/$design_capacity*100" | bc)
+        battery_health=$(printf "%.2f" "$percent")
+    fi
+
+    # --- Build Raw JSON ---
+    DeviceDetails="
+    {
+    \"Memory\": \"$memory\",
+    \"CPUManufacturer\": \"$cpu_manufacturer\",
+    \"CPUName\": \"$cpu_name\",
+    \"CPUMaxClockSpeed\": \"$cpu_max_clock\",
+    \"CPUPhysical\": \"$cpu_physical\",
+    \"CPUCores\": \"$cpu_cores\",
+    \"CPULogical\": \"$cpu_logical\",
+    \"LastBootTime\": \"$last_boot\",
+    \"BatteryHealthPercent\": \"$battery_health\",
+    \"BatteryFullChargedCapacity\": \"$max_capacity\",
+    \"BatteryDesignedCapacity\": \"$design_capacity\",
+    \"PhysicalDisks\": [
+        {
+        \"BusType\": \"$disk_bus\",
+        \"HealthStatus\": \"$disk_smart\",
+        \"Manufacturer\": \"Apple\",
+        \"Model\": \"$disk_model\",
+        \"Size\": \"$disk_size_bytes\",
+        \"Type\": \"$disk_type\",
+        \"Temperature\": \"$disk_temp\"
+        }
+    ],
+    \"DeviceManufacturer\": \"$device_manufacturer\",
+    \"DeviceModel\": \"$device_model\"
+    }"
+
+    DeviceDetailsJson=$(echo -n "$DeviceDetails" | iconv -t utf-8 | gzip -c -n | base64 | tr -d '\n')
+
+
+    MainDevice="[{\"ComputerName\":\"$ComputerName\",\"ManagedDeviceID\":\"$ManagedDeviceID\",\"DeviceDetails1\":\"$DeviceDetailsJson\"}]"
+ 
+    ResponseDeviceInventory=$(Send-LogAnalyticsData "$CustomerId" "$SharedKey" "$MainDevice" "$DeviceLog")
+ 
+fi
+#endregion DEVICEINVENTORY
  
 #Report back status
  
