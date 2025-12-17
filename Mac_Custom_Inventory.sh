@@ -1,11 +1,37 @@
 #!/bin/bash
- 
+
+# "LogIngestionAPI" (Latest) or "DataCollectorAPI" (Legacy)
+LogAPIMode="LogIngestionAPI" 
+
+########## Use for LogIngestionAPI ############
+
+# Replace with your Tenant ID in which the Data Collection Endpoints resides
+TenantId="<Enter Your Tenant ID>"
+
+# Replace with your Client ID created and granted permissions
+ClientId="<Enter your Client ID>"
+
+# Replace with your secret created for the above client
+ClientSecret="<Enter your Client Secret>"
+
+# Replace with your Data Collection Endpoint - Log Ingestion URL
+DceURI="<Enter your DCE Log Ingestion URL>"
+
+# Replace with your Data Collection Rule - Immutable ID
+DcrImmutableId="<Enter your DCR Immutable ID>"
+
+#################################################
+
+########## Use for DataCollectorAPI ############
+
 # Replace with your Log Analytics Workspace ID
 CustomerId="<ENTER YOUR LOG ANALYTICS WORKSPACE ID>"
  
 # Replace with your Primary Key
 SharedKey="<ENTER YOUR LOG ANALYTICS PRIMARY KEY HERE>"
- 
+
+#################################################
+
 #Control if you want to collect App or Device Inventory or both (True = Collect)
 CollectDeviceInventory=true
 CollectAppInventory=true
@@ -13,13 +39,16 @@ CollectAppInventory=true
 # You can use an optional field to specify the timestamp from the data. If the time field is not specified, Azure Monitor assumes the time is the message ingestion time
 # DO NOT DELETE THIS VARIABLE. Recommened keep this blank.
 TimeStampField=""
- 
+
+#Inventory Date Format (sample "%m-%d %H:%M", "%d-%m %H:%M")
+InventoryDateFormat="%m-%d %H:%M"
+
 #endregion initialize
  
 #region functions
  
 # Function to create the authorization signature
-# function New-Signature ($customerId, $sharedKey, $date, $contentLength, $method, $contentType, $resource) {
+# function New-Signature(customerId, sharedKey, date, contentLength, method, contentType, resource) {
 function New-Signature() {
     customerId=$1
     sharedKey=$2
@@ -44,9 +73,9 @@ function New-Signature() {
     
 }
  
-# Function to create and post the request
-# Function Send-LogAnalyticsData($customerId, $sharedKey, $body, $logType)
-function Send-LogAnalyticsData() {
+# Function to create and post the request using DataCollectorAPI
+# function Send-DataCollectorAPI(customerId, sharedKey, body, logType)
+function Send-DataCollectorAPI() {
     customerId=$1
     sharedKey=$2
     body=$3
@@ -85,6 +114,62 @@ function Send-LogAnalyticsData() {
  
     echo $statusmessage
 }
+
+# Function to create the bearer token
+# function New-BearerToken(tenantId, clientId, clientSecret)
+function New-BearerToken() {
+    tenantId=$1
+    clientId=$2
+    clientSecret=$3
+
+    scope=$(printf '%s' "https://monitor.azure.com//.default" | jq -sRr @uri)
+    body="client_id=$clientId&scope=$scope&client_secret=$clientSecret&grant_type=client_credentials"
+    uri="https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token"
+
+    bearerToken=$(curl -s -X POST "$uri" -H "Content-Type: application/x-www-form-urlencoded" -d "$body" | jq -r '.access_token //empty')
+
+    echo $bearerToken
+}
+
+# Function to create and post the request using LogIngestionAPI
+# function Send-LogIngestionAPI(tenantId, clientId, clientSecret, body, dceURI, dcrImmutableId, logType)
+function Send-LogIngestionAPI() {
+    tenantId=$1
+    clientId=$2
+    clientSecret=$3
+    body=$4
+    dceURI=$5
+    dcrImmutableId=$6
+    logType=$7
+
+    method="POST"
+    contentType="application/json"
+    bearerToken=$(New-BearerToken "$tenantId" "$clientId" "$clientSecret")
+
+    uri="$dceURI/dataCollectionRules/$dcrImmutableId/streams/Custom-$logType?api-version=2023-01-01"
+
+    # Define the maximum payload size limit in bytes
+    max_payload_size=$(echo -n "scale=2; 0.9 * 1024 * 1024" | bc)
+    # Calculate the payload size in bytes
+    payload_size=$(echo "scale=2; $(echo -n "$body"| wc -c)"| bc)
+ 
+    # Convert the payload size to megabytes with one decimal place
+    payload_size_mb=$(echo -n "scale=2; $payload_size / 1024 / 1024" | bc)
+ 
+    # Check if the payload size exceeds the limit
+    if [ $(bc -l <<< "$payload_size > $max_payload_size") -eq 1 ]; then
+        statusmessage="Upload payload is too big and exceeds the 1Mb limit for a single upload. Please reduce the payload size. Current payload size is: $payload_size_mb Mb"
+    else
+        payloadsize_kb=$(echo "Upload payload size is " $(echo "scale=2; $(echo -n "$body"| wc -c)/ 1024"| bc)"Kb")
+ 
+        response=$(curl --location "$uri" -w "%{http_code}" --header "Authorization: Bearer $bearerToken"  --header "Content-Type: $contentType" --data "$body" --silent)
+ 
+        statusmessage="$response : $payloadsize_kb"
+    fi
+ 
+    echo $statusmessage
+}
+
 #endregion functions
  
 #region script
@@ -97,96 +182,12 @@ function Send-LogAnalyticsData() {
 ManagedDeviceID=$(security find-certificate -a | awk -F= '/issu/ && /MICROSOFT INTUNE MDM DEVICE CA/ { getline; gsub(/"/, "", $2); print $2}' | head -n 1)
 # Retrieve ComputerName
 ComputerName=$(scutil --get ComputerName)
- 
- 
-#region APPINVENTORY
- 
-if [ "$CollectAppInventory" = true ]; then
-    #Set Name of Log
-    AppLog="PowerStacksAppInventory"
- 
-    #installedApps=$(Get-InstalledApplications)
-    installedApps=$(system_profiler SPApplicationsDataType -json)
- 
-    # Use awk to parse JSON data and extract fields
-    InstalledAppJson=$(echo "$installedApps" | awk -F'[:,]' '
-        $1 ~ /_name/ {
-            name = $2
-            gsub(/"/, "", name)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
-        }
-        $1 ~ /lastModified/ {
-            lastModified = $0
-            sub(/.*: /, "", lastModified)
-            gsub(/"/, "", lastModified)
-            gsub(/,$/, "", lastModified)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", lastModified)
-        }
-        $1 ~ /path/ {
-            path = $2
-            gsub(/"/, "", path)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", path)
-        }
-        $1 ~ /version/ {
-            version = $2
-            gsub(/"/, "", version)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", version)
-            print "{\"AppName\":\"" name "\",\"AppVersion\":\"" version "\",\"AppInstallDate\":\"" lastModified "\",\"AppInstallPath\":\"" path "\"}"
-        }
-    ' | paste -sd "," -)
-    
-    # Encode to UTF-8, compress, and then encode to base64
-    InstalledAppJson=$(echo -n "[$InstalledAppJson]" | iconv -t utf-8 | gzip -c -n | base64 | tr -d '\n')
- 
-    # Define chunk size
-    chunk_size=31744
- 
-    # Split the string into chunks and store in an array
-    InstalledAppJsonArr=()
-    while [ -n "$InstalledAppJson" ]; do
-        chunk=$(echo "$InstalledAppJson" | cut -c 1-$chunk_size)
-        InstalledAppJsonArr+=("$chunk")
-        InstalledAppJson=$(echo "$InstalledAppJson" | cut -c $(($chunk_size + 1))-)
-    done
- 
-    # Print each chunk
-    i=0
-    InstalledApps=""
-    for chunk in "${InstalledAppJsonArr[@]}"; do
-        i=$(echo $i + 1 | bc)
-        if [ "$i" == "1" ]; then
-            InstalledApps=$(echo "\"InstalledApps$i\":\"$chunk\"")
-        else
-            InstalledApps="$InstalledApps,$(echo "\"InstalledApps$i\":\"$chunk\"")"
-        fi
-    done
-    #echo $InstalledApps
-    
-    # Define the maximum installapps size limit in bytes
-    max_installapps_size=$(echo -n "scale=2; 10.0 * 31 * 1024" | bc)
-    #max_installapps_size=$((1 * 1 * 1))
-    # Calculate the installapps size in bytes
-    installapps_size=$(echo "scale=2; $(echo -n "$InstalledApps"| wc -c)"| bc)
-    # Convert the installapps size to kilobytes with one decimal place
-    installapps_size_kb=$(echo -n "scale=2; $installapps_size / 1024" | bc)
- 
-    if [ $(bc -l <<< "$installapps_size > $max_installapps_size") -eq 1 ]; then
-        echo "InstalledApp is too big and exceed the 32kb limit per column for a single upload. Please increase number of columns (#10). Current payload size is: $installapps_size_kb kb"
-        exit 1
-    fi
- 
-    MainApp="[{\"ComputerName\":\"$ComputerName\",\"ManagedDeviceID\":\"$ManagedDeviceID\",$InstalledApps}]"
- 
-    ResponseAppInventory=$(Send-LogAnalyticsData "$CustomerId" "$SharedKey" "$MainApp" "$AppLog")
- 
-fi
-#endregion APPINVENTORY
 
 #region DEVICEINVENTORY
  
 if [ "$CollectDeviceInventory" = true ]; then
     #Set Name of Log
-    DeviceLog="PowerStacksDeviceInventory"
+    DeviceLog="PowerStacksDeviceInventory$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_CL")"
  
     # --- CPU Info ---
     cpu_manufacturer=$(sysctl -n machdep.cpu.vendor 2>/dev/null || echo "Apple")
@@ -243,7 +244,7 @@ if [ "$CollectDeviceInventory" = true ]; then
     fi
 
     # --- Build Raw JSON ---
-    DeviceDetails="
+    Inventory="
     {
     \"Memory\": \"$memory\",
     \"CPUManufacturer\": \"$cpu_manufacturer\",
@@ -271,20 +272,149 @@ if [ "$CollectDeviceInventory" = true ]; then
     \"DeviceModel\": \"$device_model\"
     }"
 
-    DeviceDetailsJson=$(echo -n "$DeviceDetails" | iconv -t utf-8 | gzip -c -n | base64 | tr -d '\n')
+    DeviceDetailsJson=$(echo -n "$Inventory" | iconv -t utf-8 | gzip -c -n | base64 | tr -d '\n')
 
+    # Define chunk size
+    chunk_size=$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo 64512 || echo 31744)
 
-    MainDevice="[{\"ComputerName\":\"$ComputerName\",\"ManagedDeviceID\":\"$ManagedDeviceID\",\"DeviceDetails1\":\"$DeviceDetailsJson\"}]"
+    # Split the string into chunks and store in an array
+    DeviceDetailsJsonArr=()
+    while [ -n "$DeviceDetailsJson" ]; do
+        chunk=$(echo "$DeviceDetailsJson" | cut -c 1-$chunk_size)
+        DeviceDetailsJsonArr+=("$chunk")
+        DeviceDetailsJson=$(echo "$DeviceDetailsJson" | cut -c $(($chunk_size + 1))-)
+    done
  
-    ResponseDeviceInventory=$(Send-LogAnalyticsData "$CustomerId" "$SharedKey" "$MainDevice" "$DeviceLog")
+    # Print each chunk
+    i=0
+    DeviceDetails=""
+    for chunk in "${DeviceDetailsJsonArr[@]}"; do
+        i=$(echo $i + 1 | bc)
+        if [ "$i" == "1" ]; then
+            DeviceDetails=$(echo "\"DeviceDetails$i$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_s")\":\"$chunk\"")
+        else
+            DeviceDetails="$DeviceDetails,$(echo "\"DeviceDetails$i$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_s")\":\"$chunk\"")"
+        fi
+    done
+    #echo $DeviceDetails
+    
+    # Define the maximum devicedetails size limit in bytes
+    max_devicedetails_size=$(echo -n "scale=2; 10.0 * $( [[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "63" || echo "31" ) * 1024" | bc)
+    # Calculate the devicedetails size in bytes
+    devicedetails_size=$(echo "scale=2; $(echo -n "$DeviceDetails"| wc -c)"| bc)
+    # Convert the devicedetails size to kilobytes with one decimal place
+    devicedetails_size_kb=$(echo -n "scale=2; $devicedetails_size / 1024" | bc)
+ 
+    if [ $(bc -l <<< "$devicedetails_size > $max_devicedetails_size") -eq 1 ]; then
+        echo "DeviceDetails is too big and exceed the $( [[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "64" || echo "32" )Kb limit per column for a single upload. Please increase number of columns (#10). Current payload size is: $devicedetails_size_kb Kb"
+        exit 1
+    fi
+
+    MainDevice="[{\"ComputerName$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_s")\":\"$ComputerName\",\"ManagedDeviceID$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_g")\":\"$ManagedDeviceID\",$DeviceDetails}]"
+
+    ResponseDeviceInventory=$(
+        if [[ "$LogAPIMode" == "LogIngestionAPI" ]]; then
+            Send-LogIngestionAPI "$TenantId" "$ClientId" "$ClientSecret" "$MainDevice" "$DceURI" "$DcrImmutableId" "$DeviceLog"
+        else
+            Send-DataCollectorAPI "$CustomerId" "$SharedKey" "$MainDevice" "$DeviceLog"
+        fi
+    )
  
 fi
 #endregion DEVICEINVENTORY
+
+#region APPINVENTORY
  
+if [ "$CollectAppInventory" = true ]; then
+    #Set Name of Log
+    AppLog="PowerStacksAppInventory$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_CL")"
+ 
+    #installedApps=$(Get-InstalledApplications)
+    installedApps=$(system_profiler SPApplicationsDataType -json)
+ 
+    # Use awk to parse JSON data and extract fields
+    InstalledAppJson=$(echo "$installedApps" | awk -F'[:,]' '
+        $1 ~ /_name/ {
+            name = $2
+            gsub(/"/, "", name)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+        }
+        $1 ~ /lastModified/ {
+            lastModified = $0
+            sub(/.*: /, "", lastModified)
+            gsub(/"/, "", lastModified)
+            gsub(/,$/, "", lastModified)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", lastModified)
+        }
+        $1 ~ /path/ {
+            path = $2
+            gsub(/"/, "", path)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", path)
+        }
+        $1 ~ /version/ {
+            version = $2
+            gsub(/"/, "", version)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", version)
+            print "{\"AppName\":\"" name "\",\"AppVersion\":\"" version "\",\"AppInstallDate\":\"" lastModified "\",\"AppInstallPath\":\"" path "\"}"
+        }
+    ' | paste -sd "," -)
+    
+    # Encode to UTF-8, compress, and then encode to base64
+    InstalledAppJson=$(echo -n "[$InstalledAppJson]" | iconv -t utf-8 | gzip -c -n | base64 | tr -d '\n')
+ 
+    # Define chunk size
+    chunk_size=$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo 64512 || echo 31744)
+ 
+    # Split the string into chunks and store in an array
+    InstalledAppJsonArr=()
+    while [ -n "$InstalledAppJson" ]; do
+        chunk=$(echo "$InstalledAppJson" | cut -c 1-$chunk_size)
+        InstalledAppJsonArr+=("$chunk")
+        InstalledAppJson=$(echo "$InstalledAppJson" | cut -c $(($chunk_size + 1))-)
+    done
+ 
+    # Print each chunk
+    i=0
+    InstalledApps=""
+    for chunk in "${InstalledAppJsonArr[@]}"; do
+        i=$(echo $i + 1 | bc)
+        if [ "$i" == "1" ]; then
+            InstalledApps=$(echo "\"InstalledApps$i$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_s")\":\"$chunk\"")
+        else
+            InstalledApps="$InstalledApps,$(echo "\"InstalledApps$i$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_s")\":\"$chunk\"")"
+        fi
+    done
+    #echo $InstalledApps
+    
+    # Define the maximum installapps size limit in bytes
+    max_installapps_size=$(echo -n "scale=2; 10.0 * $( [[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "63" || echo "31" ) * 1024" | bc)
+    # Calculate the installapps size in bytes
+    installapps_size=$(echo "scale=2; $(echo -n "$InstalledApps"| wc -c)"| bc)
+    # Convert the installapps size to kilobytes with one decimal place
+    installapps_size_kb=$(echo -n "scale=2; $installapps_size / 1024" | bc)
+ 
+    if [ $(bc -l <<< "$installapps_size > $max_installapps_size") -eq 1 ]; then
+        echo "InstalledApp is too big and exceed the $( [[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "64" || echo "32" )Kb limit per column for a single upload. Please increase number of columns (#10). Current payload size is: $installapps_size_kb Kb"
+        exit 1
+    fi
+ 
+    MainApp="[{\"ComputerName$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_s")\":\"$ComputerName\",\"ManagedDeviceID$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_g")\":\"$ManagedDeviceID\",$InstalledApps}]"
+ 
+    ResponseAppInventory=$(
+        if [[ "$LogAPIMode" == "LogIngestionAPI" ]]; then
+            Send-LogIngestionAPI "$TenantId" "$ClientId" "$ClientSecret" "$MainApp" "$DceURI" "$DcrImmutableId" "$AppLog"
+        else
+            Send-DataCollectorAPI "$CustomerId" "$SharedKey" "$MainApp" "$AppLog"
+        fi
+    )
+ 
+fi
+#endregion APPINVENTORY
+
 #Report back status
  
 # Get current date in the specified format
-date=$(date -u +"%d-%m %H:%M")
+date=$(date -u "+$InventoryDateFormat")
  
 # Initialize output message
 output_message="InventoryDate: $date"
@@ -292,7 +422,7 @@ output_message="InventoryDate: $date"
 # Check CollectDeviceInventory flag
 if [ "$CollectDeviceInventory" = true ]; then
     # Check response for DeviceInventory
-    if [[ "$ResponseDeviceInventory" =~ "200 :" ]]; then
+    if [[ "$ResponseDeviceInventory" =~ ^$( [[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "204" || echo "200" )" :" ]]; then
         output_message="$output_message DeviceInventory: OK $ResponseDeviceInventory"
     else
         output_message="$output_message DeviceInventory: Fail - $ResponseDeviceInventory"
@@ -303,7 +433,7 @@ fi
 # Check CollectAppInventory flag
 if [ "$CollectAppInventory" = true ]; then
     # Check response for AppInventory
-    if [[ "$ResponseAppInventory" =~ "200 :" ]]; then
+    if [[ "$ResponseAppInventory" =~ ^$( [[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "204" || echo "200" )" :" ]]; then
         output_message="$output_message AppInventory: OK $ResponseAppInventory"
     else
         output_message="$output_message AppInventory: Fail - $ResponseAppInventory"
