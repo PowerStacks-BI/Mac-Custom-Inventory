@@ -1,32 +1,31 @@
 #!/bin/bash
 
 # "LogIngestionAPI" (Latest) or "DataCollectorAPI" (Legacy)
-LogAPIMode="LogIngestionAPI" 
+LogAPIMode="LogIngestionAPI"
 
 ########## Use for LogIngestionAPI ############
 
-# Replace with your Tenant ID in which the Data Collection Endpoints resides
-TenantId="<Enter Your Tenant ID>"
+# Replace with your Tenant ID in which the Data Collection Endpoint resides
+TenantId="<ENTER YOUR TENANT ID HERE>"
 
 # Replace with your Client ID created and granted permissions
-ClientId="<Enter your Client ID>"
+ClientId="<ENTER YOUR CLIENT ID HERE>"
 
-# Replace with your secret created for the above client
-ClientSecret="<Enter your Client Secret>"
+# Replace with your Secret created for the above Client
+ClientSecret="<ENTER YOUR CLIENT SECRET HERE>"
 
 # Replace with your Data Collection Endpoint - Log Ingestion URL
-DceURI="<Enter your DCE Log Ingestion URL>"
+DceURI="<ENTER YOUR DATA COLLECTION ENDPOINT - LOG INGESTION URL HERE>"
 
 # Replace with your Data Collection Rule - Immutable ID
-DcrImmutableId="<Enter your DCR Immutable ID>"
-
+DcrImmutableId="<ENTER YOUR DATA COLLECTION RULE - IMMUTABLE ID HERE>"
 #################################################
 
 ########## Use for DataCollectorAPI ############
 
 # Replace with your Log Analytics Workspace ID
 CustomerId="<ENTER YOUR LOG ANALYTICS WORKSPACE ID>"
- 
+
 # Replace with your Primary Key
 SharedKey="<ENTER YOUR LOG ANALYTICS PRIMARY KEY HERE>"
 
@@ -35,7 +34,7 @@ SharedKey="<ENTER YOUR LOG ANALYTICS PRIMARY KEY HERE>"
 #Control if you want to collect App or Device Inventory or both (True = Collect)
 CollectDeviceInventory=true
 CollectAppInventory=true
- 
+
 # You can use an optional field to specify the timestamp from the data. If the time field is not specified, Azure Monitor assumes the time is the message ingestion time
 # DO NOT DELETE THIS VARIABLE. Recommened keep this blank.
 TimeStampField=""
@@ -44,9 +43,9 @@ TimeStampField=""
 InventoryDateFormat="%m-%d %H:%M"
 
 #endregion initialize
- 
+
 #region functions
- 
+
 # Function to create the authorization signature
 # function New-Signature(customerId, sharedKey, date, contentLength, method, contentType, resource) {
 function New-Signature() {
@@ -57,22 +56,22 @@ function New-Signature() {
     method=$5
     contentType=$6
     resource=$7
- 
+
     xHeaders="x-ms-date:$date"
     stringToHash="$method\n$contentLength\n$contentType\n$xHeaders\n$resource"
- 
+
     # Convert the message and secret to bytes
     bytesToHash=$(echo -ne "$stringToHash" | xxd -p -u -c 256)
     keyBytes=$(echo "$sharedKey" | base64 -d | xxd -p -u -c 256)
     # Calculate HMAC-SHA256
     calculatedHash=$(echo -n "$bytesToHash" | xxd -r -p | openssl dgst -sha256 -mac HMAC -macopt hexkey:$keyBytes -binary | base64)
- 
+
     authorization=$(echo "SharedKey" $customerId:$calculatedHash)
- 
+
     echo $authorization
-    
+
 }
- 
+
 # Function to create and post the request using DataCollectorAPI
 # function Send-DataCollectorAPI(customerId, sharedKey, body, logType)
 function Send-DataCollectorAPI() {
@@ -80,38 +79,38 @@ function Send-DataCollectorAPI() {
     sharedKey=$2
     body=$3
     logType=$4
- 
+
     method="POST"
     contentType="application/json"
     resource="/api/logs"
     rfc1123date=$(date -u +%a,\ %d\ %b\ %Y\ %H:%M:%S\ GMT)
- 
+
     #contentLength=${#body}
     bodyEncoded=$(echo -n "$body" | iconv -f UTF-8 -t WINDOWS-1252 | iconv -f WINDOWS-1252 -t UTF-8)
     contentLength=$(echo -n "$bodyEncoded" | wc -c | tr -d '[:space:]')
-    
+
     signature=$(New-Signature "$customerId" "$sharedKey" "$rfc1123date" "$contentLength" "$method" "$contentType" "$resource")
     uri="https://$customerId.ods.opinsights.azure.com$resource?api-version=2016-04-01"
-    
+
     # Define the maximum payload size limit in bytes
     max_payload_size=$(echo -n "scale=2; 31.9 * 1024 * 1024" | bc)
     # Calculate the payload size in bytes
     payload_size=$(echo "scale=2; $(echo -n "$body"| wc -c)"| bc)
- 
+
     # Convert the payload size to megabytes with one decimal place
     payload_size_mb=$(echo -n "scale=2; $payload_size / 1024 / 1024" | bc)
- 
+
     # Check if the payload size exceeds the limit
     if [ $(bc -l <<< "$payload_size > $max_payload_size") -eq 1 ]; then
         statusmessage="Upload payload is too big and exceeds the 32Mb limit for a single upload. Please reduce the payload size. Current payload size is: $payload_size_mb Mb"
     else
         payloadsize_kb=$(echo "Upload payload size is " $(echo "scale=2; $(echo -n "$body"| wc -c)/ 1024"| bc)"Kb")
- 
+
         response=$(curl --location "$uri" -w "%{http_code}" --header "Authorization: $signature" --header "Log-Type: $logType" --header "x-ms-date: $rfc1123date" --header "time-generated-field;" --header "Content-Type: $contentType" --data "$body" --silent)
- 
+
         statusmessage="$response : $payloadsize_kb"
     fi
- 
+
     echo $statusmessage
 }
 
@@ -152,43 +151,43 @@ function Send-LogIngestionAPI() {
     max_payload_size=$(echo -n "scale=2; 0.9 * 1024 * 1024" | bc)
     # Calculate the payload size in bytes
     payload_size=$(echo "scale=2; $(echo -n "$body"| wc -c)"| bc)
- 
+
     # Convert the payload size to megabytes with one decimal place
     payload_size_mb=$(echo -n "scale=2; $payload_size / 1024 / 1024" | bc)
- 
+
     # Check if the payload size exceeds the limit
     if [ $(bc -l <<< "$payload_size > $max_payload_size") -eq 1 ]; then
         statusmessage="Upload payload is too big and exceeds the 1Mb limit for a single upload. Please reduce the payload size. Current payload size is: $payload_size_mb Mb"
     else
         payloadsize_kb=$(echo "Upload payload size is " $(echo "scale=2; $(echo -n "$body"| wc -c)/ 1024"| bc)"Kb")
- 
+
         response=$(curl --location "$uri" -w "%{http_code}" --header "Authorization: Bearer $bearerToken"  --header "Content-Type: $contentType" --data "$body" --silent)
- 
+
         statusmessage="$response : $payloadsize_kb"
     fi
- 
+
     echo $statusmessage
 }
 
 #endregion functions
- 
+
 #region script
- 
+
 #Get Common data for App and Device Inventory:
- 
+
 #Get Intune DeviceID and ComputerName
- 
+
 # Retrieve Intune DeviceID
 ManagedDeviceID=$(security find-certificate -a | awk -F= '/issu/ && /MICROSOFT INTUNE MDM DEVICE CA/ { getline; gsub(/"/, "", $2); print $2}' | head -n 1)
 # Retrieve ComputerName
 ComputerName=$(scutil --get ComputerName)
 
 #region DEVICEINVENTORY
- 
+
 if [ "$CollectDeviceInventory" = true ]; then
     #Set Name of Log
     DeviceLog="PowerStacksDeviceInventory$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_CL")"
- 
+
     # --- CPU Info ---
     cpu_manufacturer=$(sysctl -n machdep.cpu.vendor 2>/dev/null || echo "Apple")
     cpu_name=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Apple Silicon")
@@ -284,7 +283,7 @@ if [ "$CollectDeviceInventory" = true ]; then
         DeviceDetailsJsonArr+=("$chunk")
         DeviceDetailsJson=$(echo "$DeviceDetailsJson" | cut -c $(($chunk_size + 1))-)
     done
- 
+
     # Print each chunk
     i=0
     DeviceDetails=""
@@ -297,14 +296,14 @@ if [ "$CollectDeviceInventory" = true ]; then
         fi
     done
     #echo $DeviceDetails
-    
+
     # Define the maximum devicedetails size limit in bytes
     max_devicedetails_size=$(echo -n "scale=2; 10.0 * $( [[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "63" || echo "31" ) * 1024" | bc)
     # Calculate the devicedetails size in bytes
     devicedetails_size=$(echo "scale=2; $(echo -n "$DeviceDetails"| wc -c)"| bc)
     # Convert the devicedetails size to kilobytes with one decimal place
     devicedetails_size_kb=$(echo -n "scale=2; $devicedetails_size / 1024" | bc)
- 
+
     if [ $(bc -l <<< "$devicedetails_size > $max_devicedetails_size") -eq 1 ]; then
         echo "DeviceDetails is too big and exceed the $( [[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "64" || echo "32" )Kb limit per column for a single upload. Please increase number of columns (#10). Current payload size is: $devicedetails_size_kb Kb"
         exit 1
@@ -319,19 +318,19 @@ if [ "$CollectDeviceInventory" = true ]; then
             Send-DataCollectorAPI "$CustomerId" "$SharedKey" "$MainDevice" "$DeviceLog"
         fi
     )
- 
+
 fi
 #endregion DEVICEINVENTORY
 
 #region APPINVENTORY
- 
+
 if [ "$CollectAppInventory" = true ]; then
     #Set Name of Log
     AppLog="PowerStacksAppInventory$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_CL")"
- 
+
     #installedApps=$(Get-InstalledApplications)
     installedApps=$(system_profiler SPApplicationsDataType -json)
- 
+
     # Use awk to parse JSON data and extract fields
     InstalledAppJson=$(echo "$installedApps" | awk -F'[:,]' '
         $1 ~ /_name/ {
@@ -358,13 +357,13 @@ if [ "$CollectAppInventory" = true ]; then
             print "{\"AppName\":\"" name "\",\"AppVersion\":\"" version "\",\"AppInstallDate\":\"" lastModified "\",\"AppInstallPath\":\"" path "\"}"
         }
     ' | paste -sd "," -)
-    
+
     # Encode to UTF-8, compress, and then encode to base64
     InstalledAppJson=$(echo -n "[$InstalledAppJson]" | iconv -t utf-8 | gzip -c -n | base64 | tr -d '\n')
- 
+
     # Define chunk size
     chunk_size=$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo 64512 || echo 31744)
- 
+
     # Split the string into chunks and store in an array
     InstalledAppJsonArr=()
     while [ -n "$InstalledAppJson" ]; do
@@ -372,7 +371,7 @@ if [ "$CollectAppInventory" = true ]; then
         InstalledAppJsonArr+=("$chunk")
         InstalledAppJson=$(echo "$InstalledAppJson" | cut -c $(($chunk_size + 1))-)
     done
- 
+
     # Print each chunk
     i=0
     InstalledApps=""
@@ -385,21 +384,21 @@ if [ "$CollectAppInventory" = true ]; then
         fi
     done
     #echo $InstalledApps
-    
+
     # Define the maximum installapps size limit in bytes
     max_installapps_size=$(echo -n "scale=2; 10.0 * $( [[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "63" || echo "31" ) * 1024" | bc)
     # Calculate the installapps size in bytes
     installapps_size=$(echo "scale=2; $(echo -n "$InstalledApps"| wc -c)"| bc)
     # Convert the installapps size to kilobytes with one decimal place
     installapps_size_kb=$(echo -n "scale=2; $installapps_size / 1024" | bc)
- 
+
     if [ $(bc -l <<< "$installapps_size > $max_installapps_size") -eq 1 ]; then
         echo "InstalledApp is too big and exceed the $( [[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "64" || echo "32" )Kb limit per column for a single upload. Please increase number of columns (#10). Current payload size is: $installapps_size_kb Kb"
         exit 1
     fi
- 
+
     MainApp="[{\"ComputerName$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_s")\":\"$ComputerName\",\"ManagedDeviceID$([[ "$LogAPIMode" == "LogIngestionAPI" ]] && echo "_g")\":\"$ManagedDeviceID\",$InstalledApps}]"
- 
+
     ResponseAppInventory=$(
         if [[ "$LogAPIMode" == "LogIngestionAPI" ]]; then
             Send-LogIngestionAPI "$TenantId" "$ClientId" "$ClientSecret" "$MainApp" "$DceURI" "$DcrImmutableId" "$AppLog"
@@ -407,18 +406,18 @@ if [ "$CollectAppInventory" = true ]; then
             Send-DataCollectorAPI "$CustomerId" "$SharedKey" "$MainApp" "$AppLog"
         fi
     )
- 
+
 fi
 #endregion APPINVENTORY
 
 #Report back status
- 
+
 # Get current date in the specified format
 date=$(date -u "+$InventoryDateFormat")
- 
+
 # Initialize output message
 output_message="InventoryDate: $date"
- 
+
 # Check CollectDeviceInventory flag
 if [ "$CollectDeviceInventory" = true ]; then
     # Check response for DeviceInventory
@@ -429,7 +428,7 @@ if [ "$CollectDeviceInventory" = true ]; then
         exit 1
     fi
 fi
- 
+
 # Check CollectAppInventory flag
 if [ "$CollectAppInventory" = true ]; then
     # Check response for AppInventory
@@ -440,8 +439,8 @@ if [ "$CollectAppInventory" = true ]; then
         exit 1
     fi
 fi
- 
+
 echo "$output_message"
 exit 0
- 
+
 #endregion script
